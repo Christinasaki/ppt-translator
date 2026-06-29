@@ -41,7 +41,8 @@ python ppt_translate_standalone.py <input.pptx> [-o output.pptx] [-d zh2en|en2zh
 | `-o, --output` | `{name}_EN.pptx` or `_ZH.pptx` | Output file path |
 | `-d, --direction` | `zh2en` | Translation direction |
 | `-t, --terms` | none | Terminology file (`.xlsx` or `.json`) |
-| `--font` | `Arial` | Target font family for translated text |
+<<<<<<< HEAD
+| `--font` | 保留原字体 | Target font family for translated text (omit to preserve original) |
 | `--no-title-case` | off | Disable automatic Title Case for zh→en |
 
 ### Examples
