@@ -70,7 +70,7 @@ from ppt_translator import PPTTranslator, Settings
 # 创建配置
 settings = Settings(
     direction="zh2en",
-    target_font="Arial",
+    # target_font="Arial",  # 不指定则保留原字体
     terminology_file="terms.xlsx",
 )
 
@@ -107,7 +107,7 @@ translator.translate_ppt("input.pptx", "output.pptx")
 {
   "direction": "zh2en",
   "source_font": "Arial",
-  "target_font": "Arial",
+  "target_font": "",  // 空字符串表示保留原字体
   "terminology_file": "terms.xlsx",
   "short_translation_threshold": {
     "width_inches": 5.0,
