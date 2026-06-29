@@ -1,6 +1,6 @@
 # PPT一键翻译 (PPT Translator)
 
-通用的 PowerPoint 演示文稿翻译工具，支持中英双向翻译，可配置术语库。
+通用的 PowerPoint 演示文稿翻译工具，支持中英翻译，可配置术语库。
 
 ## 功能特性
 
