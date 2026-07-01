@@ -133,3 +133,9 @@ ppt-translator/
 - For large presentations (100+ slides), translation may take a few minutes due to font metric calculations
 - The tool works with `.pptx` files only (not legacy `.ppt` format)
 - Encrypted or password-protected presentations are not supported
+
+## Known Bug Fixes
+
+### `word_wrap` AttributeError (Fixed 2026-06-29)
+- **Issue**: `_Paragraph` object has no attribute `word_wrap` — `word_wrap` belongs to `TextFrame`, not `Paragraph`
+- **Fix**: Pass `word_wrap` as parameter to `_process_paragraph`, read from `TextFrame` via `getattr(tf, 'word_wrap', True)`

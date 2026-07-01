@@ -17,8 +17,11 @@ import os
 import platform
 import re
 import sys
+import time
+import urllib.request
+import urllib.error
 from pathlib import Path
-from typing import Optional, Dict, Set, Tuple
+from typing import Optional, Dict, Set, Tuple, List
 
 # Third-party imports
 from pptx import Presentation
@@ -57,7 +60,7 @@ DEFAULT_PRESERVED_TOKENS = {
 def detect_font_path(font_name: str = "Arial") -> Optional[str]:
     """Auto-detect font path based on operating system."""
     system = platform.system()
-    
+
     if system == "Windows":
         candidates = [
             Path(f"C:\\Windows\\Fonts\\{font_name.lower()}.ttf"),
@@ -77,11 +80,11 @@ def detect_font_path(font_name: str = "Arial") -> Optional[str]:
             Path(f"/usr/share/fonts/{font_name}.ttf"),
             Path(f"/usr/share/fonts/truetype/{font_name}.ttf"),
         ]
-    
+
     for path in candidates:
         if path.exists():
             return str(path)
-    
+
     return None
 
 
@@ -92,7 +95,7 @@ def measure_text_width(text: str, size_pt: int, font_path: Optional[str] = None)
             font = ImageFont.truetype(font_path, int(size_pt))
         else:
             font = ImageFont.load_default()
-        
+
         bbox = font.getbbox(text)
         return bbox[2] - bbox[0]
     except Exception:
@@ -114,10 +117,10 @@ def apply_title_case(text: str, small_words: Set[str], preserved_tokens: Dict[st
     matches = list(ALPHA_RE.finditer(text))
     if not matches:
         return text
-    
+
     first_start = matches[0].start()
     last_end = matches[-1].end()
-    
+
     def capitalize_token(token: str) -> str:
         if token.isupper():
             return token
@@ -125,21 +128,21 @@ def apply_title_case(text: str, small_words: Set[str], preserved_tokens: Dict[st
         if lower in preserved_tokens:
             return preserved_tokens[lower]
         return token.capitalize()
-    
+
     def repl(m):
         token = m.group()
         lower = token.lower()
         is_first = (m.start() == first_start)
         is_last = (m.end() == last_end)
-        
+
         if lower in ("s", "t") and m.start() > 0 and text[m.start() - 1] == "'":
             return lower
-        
+
         if is_first or is_last or lower not in small_words:
             return capitalize_token(token)
-        
+
         return lower
-    
+
     return ALPHA_RE.sub(repl, text)
 
 
@@ -155,18 +158,18 @@ def merge_paragraph_runs(paragraph) -> Tuple:
     full_text = ""
     first_run = None
     base_size = None
-    
+
     for run in paragraph.runs:
         full_text += run.text
         if first_run is None:
             first_run = run
         if base_size is None and run.font.size is not None:
             base_size = run.font.size.pt
-    
+
     for run in paragraph.runs:
         if run is not first_run:
             run.text = ""
-    
+
     return first_run, full_text, base_size
 
 
@@ -178,14 +181,14 @@ def wrap_lines(text: str, size_pt: int, max_width_pt: float, font_path: Optional
         if not words:
             lines.append("")
             continue
-        
+
         current_line = words[0]
         current_width = measure_text_width(current_line, size_pt, font_path)
-        
+
         for word in words[1:]:
             word_width = measure_text_width(word, size_pt, font_path)
             space_width = measure_text_width(" ", size_pt, font_path)
-            
+
             if current_width + space_width + word_width <= max_width_pt:
                 current_line += " " + word
                 current_width += space_width + word_width
@@ -193,9 +196,9 @@ def wrap_lines(text: str, size_pt: int, max_width_pt: float, font_path: Optional
                 lines.append(current_line)
                 current_line = word
                 current_width = word_width
-        
+
         lines.append(current_line)
-    
+
     return lines
 
 
@@ -209,17 +212,17 @@ def get_group_scale(shape) -> Tuple[float, float]:
     grpSpPr = el.find(qn("p:grpSpPr"))
     if grpSpPr is None:
         return (1.0, 1.0)
-    
+
     xfrm = grpSpPr.find(qn("a:xfrm"))
     if xfrm is None:
         return (1.0, 1.0)
-    
+
     ext = xfrm.find(qn("a:ext"))
     chExt = xfrm.find(qn("a:chExt"))
-    
+
     if ext is None or chExt is None:
         return (1.0, 1.0)
-    
+
     try:
         ext_cx = int(ext.get("cx", "0"))
         ext_cy = int(ext.get("cy", "0"))
@@ -227,10 +230,10 @@ def get_group_scale(shape) -> Tuple[float, float]:
         ch_cy = int(chExt.get("cy", "0"))
     except (ValueError, TypeError):
         return (1.0, 1.0)
-    
+
     if ch_cx <= 0 or ch_cy <= 0:
         return (1.0, 1.0)
-    
+
     return (ext_cx / ch_cx, ext_cy / ch_cy)
 
 
@@ -238,10 +241,10 @@ def should_use_short_translation(shape_width_emu: int, shape_height_emu: int) ->
     """Determine if a text box should use short/compact translations."""
     if shape_width_emu is None or shape_height_emu is None:
         return False
-    
+
     width_in = shape_width_emu / 914400
     height_in = shape_height_emu / 914400
-    
+
     return (width_in < 5.0) or (width_in < 6.0 and height_in < 1.0)
 
 
@@ -252,19 +255,19 @@ def fit_font_size(text: str, shape_width_emu: int, shape_height_emu: int,
     """Calculate the optimal font size to fit text within a shape."""
     if not text:
         return base_size_pt
-    
+
     max_width_pt = (shape_width_emu - margin_emu) / 12700
     shape_height_pt = (shape_height_emu - margin_emu) / 12700
-    
+
     if max_width_pt <= 0 or shape_height_pt <= 0:
         return base_size_pt
-    
+
     def fits(size: int) -> bool:
         words = text.split()
         for word in words:
             if measure_text_width(word, size, font_path) > max_width_pt:
                 return False
-        
+
         if word_wrap:
             lines = wrap_lines(text, size, max_width_pt, font_path)
             line_height = size * line_height_ratio
@@ -274,16 +277,16 @@ def fit_font_size(text: str, shape_width_emu: int, shape_height_emu: int,
             lines = text.split("\n")
             longest = max(lines, key=lambda x: measure_text_width(x, size, font_path))
             return measure_text_width(longest, size, font_path) <= max_width_pt
-    
+
     if fits(base_size_pt):
         return base_size_pt
-    
+
     new_size = base_size_pt
     while new_size > min_size:
         new_size -= 1
         if fits(new_size):
             return new_size
-    
+
     return min_size
 
 
@@ -304,57 +307,57 @@ def process_smartart(shape, translate_func, set_font_func) -> bool:
     """Translate text inside a SmartArt graphicFrame."""
     if shape._element.tag != qn("p:graphicFrame"):
         return False
-    
+
     graphicFrame = shape._element
     graphic = graphicFrame.find(qn("a:graphic"))
     if graphic is None:
         return False
-    
+
     graphicData = graphic.find(qn("a:graphicData"))
     if graphicData is None:
         return False
-    
+
     DGM_RELIDS = "{http://schemas.openxmlformats.org/drawingml/2006/diagram}relIds"
     relIds = graphicData.find(DGM_RELIDS)
     if relIds is None:
         return False
-    
+
     dm_rid = relIds.get(qn("r:dm"))
     if not dm_rid:
         return False
-    
+
     slide_part = shape.part
     try:
         data_part = slide_part.related_part(dm_rid)
     except Exception:
         return False
-    
+
     root = etree.fromstring(data_part._blob)
     modified = False
-    
+
     for t_el in root.iter(qn("a:t")):
         original = t_el.text or ""
         stripped = original.strip()
-        
+
         if not stripped:
             continue
-        
+
         translated = translate_func(stripped)
-        
+
         if translated != stripped:
             t_el.text = translated
             modified = True
-            
+
             r_el = t_el.getparent()
             if r_el is not None and r_el.tag == qn("a:r"):
                 rPr = r_el.find(qn("a:rPr"))
                 if rPr is None:
                     rPr = etree.SubElement(r_el, qn("a:rPr"))
                 set_font_func(rPr)
-    
+
     if modified:
         data_part._blob = etree.tostring(root, encoding="UTF-8", standalone=True, xml_declaration=True)
-    
+
     return modified
 
 
@@ -364,159 +367,231 @@ def process_smartart(shape, translate_func, set_font_func) -> bool:
 
 class PPTTranslator:
     """Universal PowerPoint translator."""
-    
-    def __init__(self, direction: str = "zh2en", target_font: str = "Arial",
+
+    def __init__(self, direction: str = "zh2en", target_font: Optional[str] = None,
                  terminology_file: Optional[str] = None,
-                 title_case_enabled: bool = True):
+                 title_case_enabled: bool = True,
+                 api_url: Optional[str] = None,
+                 api_key: Optional[str] = None,
+                 api_model: str = "mimo-v2.5"):
         self.direction = direction
-        self.target_font = target_font
+        self.target_font = target_font  # None = 保留原字体
         self.title_case_enabled = title_case_enabled
         self.terminology: Dict[str, str] = {}
-        self.font_path = detect_font_path(target_font)
-        
+        self.font_path = detect_font_path(target_font or "Arial")
+        self.api_url = api_url
+        self.api_key = api_key
+        self.api_model = api_model
+
         if terminology_file:
             self.load_terminology(terminology_file)
-    
+
     def load_terminology(self, file_path: str):
         """Load terminology from Excel or JSON file."""
         path = Path(file_path)
-        
+
         if path.suffix.lower() in (".xlsx", ".xls"):
             self._load_from_excel(file_path)
         elif path.suffix.lower() == ".json":
             self._load_from_json(file_path)
         else:
             raise ValueError(f"Unsupported terminology file format: {path.suffix}")
-    
+
     def _load_from_excel(self, file_path: str):
         """Load terminology from Excel file."""
         wb = openpyxl.load_workbook(file_path, data_only=True)
         ws = wb.active
-        
+
         for row in ws.iter_rows(values_only=True):
             if row and len(row) >= 2 and row[0] and row[1]:
                 source, target = str(row[0]).strip(), str(row[1]).strip()
                 if source and target:
                     self.terminology[source] = target
-        
+
         wb.close()
-    
+
     def _load_from_json(self, file_path: str):
         """Load terminology from JSON file."""
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        
+
         if isinstance(data, dict):
             self.terminology = data
         elif isinstance(data, list):
             for item in data:
                 if "source" in item and "target" in item:
                     self.terminology[item["source"]] = item["target"]
-    
+
+    def _call_api(self, messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
+        """Call OpenAI-compatible chat API."""
+        if not self.api_url or not self.api_key:
+            return ""
+
+        url = self.api_url.rstrip("/")
+        if not url.endswith("/chat/completions"):
+            url += "/chat/completions"
+
+        payload = json.dumps({
+            "model": self.api_model,
+            "messages": messages,
+            "temperature": temperature,
+        }).encode("utf-8")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        req = urllib.request.Request(url, data=payload, headers=headers)
+
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return data["choices"][0]["message"]["content"].strip()
+            except (urllib.error.URLError, urllib.error.HTTPError, KeyError, json.JSONDecodeError) as e:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    print(f"  API error: {e}", file=sys.stderr)
+                    return ""
+
+        return ""
+
     def translate_text(self, text: str, prefer_short: bool = False) -> str:
-        """Translate text using terminology and rules."""
+        """Translate text using AI API, with terminology fallback."""
         original = text
         stripped = text.strip()
-        
+
         if not stripped:
             return text
-        
-        # Check terminology
+
+        # Check terminology first
         if original in self.terminology:
             translated = self.terminology[original]
         elif stripped in self.terminology:
             translated = self.terminology[stripped]
+        elif self.api_url and self.api_key:
+            # Use AI API for translation
+            src_lang = "Chinese" if self.direction == "zh2en" else "English"
+            tgt_lang = "English" if self.direction == "zh2en" else "Chinese"
+
+            style_hint = "Use concise, natural phrasing suitable for a slide title or label." if prefer_short else "Keep the translation natural and fluent."
+
+            prompt = (
+                f"Translate the following {src_lang} text to {tgt_lang}. "
+                f"Output ONLY the translated text, no explanations or quotes. "
+                f"{style_hint}\n\n{stripped}"
+            )
+
+            result = self._call_api([
+                {"role": "system", "content": f"You are a professional translator. Translate {src_lang} to {tgt_lang}. Output only the translation."},
+                {"role": "user", "content": prompt},
+            ])
+
+            translated = result if result else stripped
         else:
             translated = stripped
-        
+
         # Apply formatting rules based on direction
         if self.direction == "zh2en":
             if is_sentence(translated):
                 translated = capitalize_first(translated)
             elif self.title_case_enabled:
                 translated = apply_title_case(translated, DEFAULT_SMALL_WORDS, DEFAULT_PRESERVED_TOKENS)
-        
+
         return translated
-    
+
     def set_run_font_family(self, run, family: Optional[str] = None):
-        """Set latin, eastAsian, and complexScript typefaces for a run."""
+        """Set latin, eastAsian, and complexScript typefaces for a run.
+
+        If target_font is None (default), the original font is preserved.
+        Only apply font change when explicitly specified via --font flag.
+        """
         if family is None:
             family = self.target_font
-        
+
+        if family is None:
+            # 保留原字体，不做任何修改
+            return
+
         run.font.name = family
         rPr = run._r.get_or_add_rPr()
-        
+
         for tag in ("a:latin", "a:ea", "a:cs"):
             el = rPr.find(qn(tag))
             if el is None:
                 el = etree.SubElement(rPr, qn(tag))
             el.set("typeface", family)
-    
+
     def process_text_frame(self, tf, shape_width_emu: int, shape_height_emu: int):
         """Process a text frame, translating and formatting all paragraphs."""
         full_text = "".join(para.text for para in tf.paragraphs).strip()
         prefer_short = should_use_short_translation(shape_width_emu, shape_height_emu)
-        
+
         if full_text and full_text in self.terminology:
             translated = self.translate_text(full_text, prefer_short)
-            
+
             first_para = tf.paragraphs[0]
             first_run = first_para.runs[0] if first_para.runs else first_para.add_run()
-            
+
             for para in tf.paragraphs:
                 for run in para.runs:
                     run.text = ""
-            
+
             first_run.text = translated
             self.set_run_font_family(first_run)
-            
+
             base_size = first_run.font.size.pt if first_run.font.size else None
             if base_size:
+                word_wrap = getattr(tf, 'word_wrap', True)
                 new_size = fit_font_size(translated, shape_width_emu, shape_height_emu,
-                                        base_size, tf.word_wrap, font_path=self.font_path)
+                                        base_size, word_wrap, font_path=self.font_path)
                 first_run.font.size = Pt(new_size)
-            
+
             return
-        
+
+        word_wrap = getattr(tf, 'word_wrap', True)
         for para in tf.paragraphs:
-            self._process_paragraph(para, shape_width_emu, shape_height_emu)
-    
-    def _process_paragraph(self, para, shape_width_emu: int, shape_height_emu: int):
+            self._process_paragraph(para, shape_width_emu, shape_height_emu, word_wrap)
+
+    def _process_paragraph(self, para, shape_width_emu: int, shape_height_emu: int, word_wrap: bool = True):
         """Process a single paragraph."""
         run, original_text, base_size = merge_paragraph_runs(para)
-        
+
         if run is None or not original_text.strip():
             return
-        
+
         prefer_short = should_use_short_translation(shape_width_emu, shape_height_emu)
         translated = self.translate_text(original_text, prefer_short)
         run.text = translated
         self.set_run_font_family(run)
-        
+
         if base_size:
             new_size = fit_font_size(translated, shape_width_emu, shape_height_emu,
-                                    base_size, para.word_wrap, font_path=self.font_path)
+                                    base_size, word_wrap, font_path=self.font_path)
             run.font.size = Pt(new_size)
-    
+
     def process_shape(self, shape, scale_x: float = 1.0, scale_y: float = 1.0):
         """Process a single shape."""
         if hasattr(shape, "shapes"):
             gscale_x, gscale_y = get_group_scale(shape)
             new_scale_x = scale_x * gscale_x
             new_scale_y = scale_y * gscale_y
-            
+
             for child in shape.shapes:
                 self.process_shape(child, new_scale_x, new_scale_y)
             return
-        
+
         if shape._element.tag == qn("p:graphicFrame"):
+            smartart_font = self.target_font  # None = 保留原字体
             process_smartart(
                 shape,
                 lambda text: self.translate_text(text),
-                lambda rPr: set_xml_run_font_family(rPr, self.target_font),
+                lambda rPr: set_xml_run_font_family(rPr, smartart_font) if smartart_font else None,
             )
             return
-        
+
         if shape.has_table:
             for row in shape.table.rows:
                 for cell in row.cells:
@@ -524,20 +599,20 @@ class PPTTranslator:
                                           shape.width * scale_x,
                                           shape.height * scale_y)
             return
-        
+
         if shape.has_text_frame:
             self.process_text_frame(shape.text_frame,
                                   shape.width * scale_x,
                                   shape.height * scale_y)
-    
+
     def translate_ppt(self, input_path: str, output_path: str):
         """Translate an entire PowerPoint file."""
         prs = Presentation(input_path)
-        
+
         for slide in prs.slides:
             for shape in slide.shapes:
                 self.process_shape(shape)
-        
+
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         prs.save(output_path)
         print(f"Saved translated PPT to: {output_path}")
@@ -553,48 +628,54 @@ def main():
         prog="ppt-translate",
         description="Translate PowerPoint presentations between Chinese and English",
     )
-    
+
     parser.add_argument("input", type=str, help="Input PowerPoint file (.pptx)")
     parser.add_argument("-o", "--output", type=str, help="Output PowerPoint file")
     parser.add_argument("-d", "--direction", type=str, choices=["zh2en", "en2zh"],
                        default="zh2en", help="Translation direction (default: zh2en)")
     parser.add_argument("-t", "--terms", type=str, help="Terminology file (.xlsx or .json)")
-    parser.add_argument("--font", type=str, default="Arial", help="Target font family")
+    parser.add_argument("--font", type=str, default=None, help="Target font family (default: preserve original font)")
     parser.add_argument("--no-title-case", action="store_true", help="Disable title case")
-    
+    parser.add_argument("--api-url", type=str, help="OpenAI-compatible API URL")
+    parser.add_argument("--api-key", type=str, help="API Key")
+    parser.add_argument("--api-model", type=str, default="mimo-v2.5", help="API model name")
+
     args = parser.parse_args()
-    
+
     try:
         # Validate input
         if not os.path.exists(args.input):
             print(f"Error: Input file not found: {args.input}", file=sys.stderr)
             return 1
-        
+
         if not args.input.lower().endswith((".pptx", ".ppt")):
             print(f"Error: Input file is not a PowerPoint file", file=sys.stderr)
             return 1
-        
+
         # Generate output path if not specified
         if not args.output:
             path = Path(args.input)
             suffix = "_EN" if args.direction == "zh2en" else "_ZH"
             args.output = str(path.parent / f"{path.stem}{suffix}{path.suffix}")
-        
+
         # Create translator and run
         translator = PPTTranslator(
             direction=args.direction,
             target_font=args.font,
             terminology_file=args.terms,
             title_case_enabled=not args.no_title_case,
+            api_url=args.api_url,
+            api_key=args.api_key,
+            api_model=args.api_model,
         )
         translator.translate_ppt(args.input, args.output)
-        
+
         print(f"\nTranslation complete!")
         print(f"Direction: {args.direction}")
         print(f"Output: {args.output}")
-        
+
         return 0
-        
+
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
